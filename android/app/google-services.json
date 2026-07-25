@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "691961481743",
+    "project_id": "enactus-536af",
+    "storage_bucket": "enactus-536af.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:691961481743:android:05a7811f283a87c488f17a",
+        "android_client_info": {
+          "package_name": "com.example.session1"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyANaOqZzO82ZwBxgKcUZhPCOJZMTKRLVKY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

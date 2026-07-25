@@ -1,53 +1,22 @@
-import 'dart:convert'; // Required for jsonEncode and jsonDecode
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart'; // Import package
 import '../models/task_models.dart';
+import '../service/firestore.dart';
 import 'add_task_screen.dart';
 
 class TaskDetailsScreen extends StatefulWidget {
-  const TaskDetailsScreen({super.key});
+  final String username;
+  const TaskDetailsScreen({super.key, required this.username});
 
   @override
   State<TaskDetailsScreen> createState() => _TaskDetailsScreenState();
 }
 
 class _TaskDetailsScreenState extends State<TaskDetailsScreen> {
-  // Our in-memory database
-  List<TaskModel> tasksList = [];
+  final FirestoreService _firestoreService = FirestoreService();
 
-  @override
-  void initState() {
-    super.initState();
-    _loadTasksFromPrefs();
-  }
-
-  // 1. Load tasks from local storage
-  Future<void> _loadTasksFromPrefs() async {
-    final prefs = await SharedPreferences.getInstance();
-    final String? tasksString = prefs.getString('enactus_tasks_key');
-
-    if (tasksString != null) {
-      // Decode the string back to a List of raw Maps
-      final List<dynamic> decodedList = jsonDecode(tasksString);
-
-      setState(() {
-        // Convert raw Maps back to TaskModel objects
-        tasksList = decodedList.map((item) => TaskModel.fromMap(item)).toList();
-      });
-    }
-  }
-
-  // 2. Save current list to local storage
-  Future<void> _saveTasksToPrefs() async {
-    final prefs = await SharedPreferences.getInstance();
-
-    // Convert our list of objects into a list of maps, then encode to a single JSON string
-    final String encodedData = jsonEncode(
-      tasksList.map((task) => task.toMap()).toList(),
-    );
-
-    await prefs.setString('enactus_tasks_key', encodedData);
-  }
+  // Notice there's no _loadTasksFromPrefs() / _saveTasksToPrefs() anymore,
+  // and no local `tasksList` field either. The StreamBuilder below IS
+  // the state now — Firestore pushes updates, we just render them.
 
   Future<bool?> _confirmDeletion(BuildContext context) {
     return showDialog<bool>(
@@ -72,34 +41,9 @@ class _TaskDetailsScreenState extends State<TaskDetailsScreen> {
     );
   }
 
-  void _deleteTask(int index) {
-    final deletedTask = tasksList[index];
-    setState(() {
-      tasksList.removeAt(index);
-    });
-
-    _saveTasksToPrefs(); // SYNC WITH LOCAL STORAGE
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: const Text("Task deleted successfully!"),
-        backgroundColor: Colors.redAccent,
-        action: SnackBarAction(
-          label: 'UNDO',
-          textColor: Colors.white,
-          onPressed: () {
-            setState(() {
-              tasksList.insert(index, deletedTask);
-            });
-            _saveTasksToPrefs(); // SYNC WITH LOCAL STORAGE ON UNDO
-          },
-        ),
-      ),
-    );
-  }
-
-  void _editTask(int index) {
-    TextEditingController editController = TextEditingController(text: tasksList[index].taskName);
+  void _editTask(TaskModel task) {
+    TextEditingController editController =
+    TextEditingController(text: task.taskName);
 
     showDialog(
       context: context,
@@ -117,19 +61,19 @@ class _TaskDetailsScreenState extends State<TaskDetailsScreen> {
             ),
             ElevatedButton(
               onPressed: () {
-                setState(() {
-                  tasksList[index] = TaskModel(
-                    taskName: editController.text,
-                    assignedTo: tasksList[index].assignedTo,
-                    isDone: tasksList[index].isDone,
-                  );
-                });
-
-                _saveTasksToPrefs(); // SYNC WITH LOCAL STORAGE ON EDIT
+                final updatedTask = TaskModel(
+                  id: task.id,
+                  taskName: editController.text,
+                  assignedTo: task.assignedTo,
+                  isDone: task.isDone,
+                );
+                _firestoreService.updateTask(widget.username, updatedTask);
 
                 Navigator.pop(context);
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text("Task updated!"), backgroundColor: Colors.green),
+                  const SnackBar(
+                      content: Text("Task updated!"),
+                      backgroundColor: Colors.green),
                 );
               },
               child: const Text("Save"),
@@ -144,80 +88,106 @@ class _TaskDetailsScreenState extends State<TaskDetailsScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Enactus Task Manager"),
+        title: Text("Tasks for ${widget.username}"),
         backgroundColor: Colors.teal,
         foregroundColor: Colors.white,
       ),
-      body: tasksList.isEmpty
-          ? const Center(
-        child: Text(
-          "No tasks assigned yet. Add one below!",
-          style: TextStyle(fontSize: 18, color: Colors.grey),
-        ),
-      )
-          : ListView.builder(
-        itemCount: tasksList.length,
-        itemBuilder: (context, index) {
-          final task = tasksList[index];
+      body: StreamBuilder<List<TaskModel>>(
+        // This stream is the whole trick: Firestore keeps this connection
+        // open and re-emits the full task list on every change, so the UI
+        // updates itself with zero manual setState() calls for the list.
+        stream: _firestoreService.getTasksStream(widget.username),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
 
-          return Dismissible(
-            key: UniqueKey(),
-            direction: DismissDirection.endToStart,
-            background: Container(
-              color: Colors.red,
-              alignment: Alignment.centerRight,
-              padding: const EdgeInsets.only(right: 20),
-              child: const Icon(Icons.delete, color: Colors.white, size: 30),
-            ),
-            confirmDismiss: (direction) async {
-              return await _confirmDeletion(context);
-            },
-            onDismissed: (direction) {
-              _deleteTask(index);
-            },
-            child: Card(
-              margin: const EdgeInsets.symmetric(horizontal: 15, vertical: 8),
-              elevation: 3,
-              child: ListTile(
-                leading: Checkbox(
-                  value: task.isDone,
-                  onChanged: (bool? newValue) {
-                    setState(() {
-                      task.isDone = newValue ?? false;
-                    });
-                    _saveTasksToPrefs(); // SYNC WITH LOCAL STORAGE ON STATUS TOGGLE
-                  },
+          if (snapshot.hasError) {
+            return Center(
+                child: Text("Something went wrong: ${snapshot.error}"));
+          }
+
+          final tasksList = snapshot.data ?? [];
+
+          if (tasksList.isEmpty) {
+            return const Center(
+              child: Text(
+                "No tasks assigned yet. Add one below!",
+                style: TextStyle(fontSize: 18, color: Colors.grey),
+              ),
+            );
+          }
+
+          return ListView.builder(
+            itemCount: tasksList.length,
+            itemBuilder: (context, index) {
+              final task = tasksList[index];
+
+              return Dismissible(
+                key: ValueKey(task.id),
+                direction: DismissDirection.endToStart,
+                background: Container(
+                  color: Colors.red,
+                  alignment: Alignment.centerRight,
+                  padding: const EdgeInsets.only(right: 20),
+                  child: const Icon(Icons.delete, color: Colors.white, size: 30),
                 ),
-                title: Text(
-                  task.taskName,
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                    decoration: task.isDone ? TextDecoration.lineThrough : null,
-                    color: task.isDone ? Colors.grey : Colors.black,
-                  ),
-                ),
-                subtitle: Text("Assigned to: ${task.assignedTo}"),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.edit, color: Colors.blue),
-                      onPressed: () => _editTask(index),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.delete, color: Colors.red),
-                      onPressed: () async {
-                        bool confirm = await _confirmDeletion(context) ?? false;
-                        if (confirm) {
-                          _deleteTask(index);
-                        }
+                confirmDismiss: (direction) async {
+                  return await _confirmDeletion(context);
+                },
+                onDismissed: (direction) {
+                  _firestoreService.deleteTask(widget.username, task.id!);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                        content: Text("Task deleted successfully!"),
+                        backgroundColor: Colors.redAccent),
+                  );
+                },
+                child: Card(
+                  margin: const EdgeInsets.symmetric(horizontal: 15, vertical: 8),
+                  elevation: 3,
+                  child: ListTile(
+                    leading: Checkbox(
+                      value: task.isDone,
+                      onChanged: (bool? newValue) {
+                        _firestoreService.toggleDone(
+                            widget.username, task.id!, newValue ?? false);
                       },
                     ),
-                  ],
+                    title: Text(
+                      task.taskName,
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        decoration:
+                        task.isDone ? TextDecoration.lineThrough : null,
+                        color: task.isDone ? Colors.grey : Colors.black,
+                      ),
+                    ),
+                    subtitle: Text("Assigned to: ${task.assignedTo}"),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          icon: const Icon(Icons.edit, color: Colors.blue),
+                          onPressed: () => _editTask(task),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.red),
+                          onPressed: () async {
+                            bool confirm = await _confirmDeletion(context) ?? false;
+                            if (confirm) {
+                              _firestoreService.deleteTask(
+                                  widget.username, task.id!);
+                            }
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
-              ),
-            ),
+              );
+            },
           );
         },
       ),
@@ -229,14 +199,14 @@ class _TaskDetailsScreenState extends State<TaskDetailsScreen> {
           );
 
           if (newTask != null) {
-            setState(() {
-              tasksList.add(newTask);
-            });
-
-            _saveTasksToPrefs(); // SYNC WITH LOCAL STORAGE ON ADDITION
+            // Just write to Firestore — the StreamBuilder above will
+            // pick up the change and rebuild the list automatically.
+            await _firestoreService.addTask(widget.username, newTask);
 
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text("Task added successfully!"), backgroundColor: Colors.teal),
+              const SnackBar(
+                  content: Text("Task added successfully!"),
+                  backgroundColor: Colors.teal),
             );
           }
         },
